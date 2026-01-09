@@ -31,6 +31,9 @@ services:
       # - ../src:/app/src
       # - ../app.py:/app/app.py
       # - ../assets:/app/assets
+      - /data/model/voxcpm/huggingface:/root/.cache/huggingface
+      - /data/model/voxcpm/modelscope:/root/.cache/modelscope
+      - /data:/data
     
     # 共享内存大小（对于大模型很重要）
     shm_size: '8gb'

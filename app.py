@@ -271,4 +271,4 @@ def run_demo(server_name: str = "localhost", server_port: int = 7860, show_error
 
 
 if __name__ == "__main__":
-    run_demo()
+    run_demo(server_name="0.0.0.0")

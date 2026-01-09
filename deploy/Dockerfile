@@ -19,12 +19,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制项目文件
-COPY . /app
+COPY pyproject.toml /app
 
 # 安装Python依赖
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -r requirements.txt
+
+COPY . /app
 
 # 创建缓存目录
 RUN mkdir -p /app/cache/huggingface /app/cache/torch /app/models

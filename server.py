@@ -73,21 +73,20 @@ def get_asr_model() -> AutoModel:
     if asr_model is not None:
         return asr_model
 
-    with model_lock:
-        if asr_model is None:
-            device = "cuda:0" if torch.cuda.is_available() else "cpu"
-            logging.info(f"开始加载 ASR 模型 SenseVoiceSmall，device={device} ...")
-            try:
-                asr_model = AutoModel(
-                    model="iic/SenseVoiceSmall",
-                    disable_update=True,
-                    log_level="WARNING",
-                    device=device,
-                )
-                logging.info("ASR 模型加载成功。")
-            except Exception as e:
-                logging.error(f"加载 ASR 模型失败: {e}")
-                raise
+    if asr_model is None:
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        logging.info(f"开始加载 ASR 模型 SenseVoiceSmall，device={device} ...")
+        try:
+            asr_model = AutoModel(
+                model="iic/SenseVoiceSmall",
+                disable_update=True,
+                log_level="WARNING",
+                device=device,
+            )
+            logging.info("ASR 模型加载成功。")
+        except Exception as e:
+            logging.error(f"加载 ASR 模型失败: {e}")
+            raise
     return asr_model
 
 
@@ -96,12 +95,11 @@ def recognize_prompt_text(prompt_wav_path: str) -> str:
     使用 ASR 从参考音频中识别文本，用于自动生成 prompt_text。
     """
     model = get_asr_model()
+    if prompt_wav_path is None:
+        return ""
     res = model.generate(input=prompt_wav_path, language="auto", use_itn=True)
-    text = res[0].get("text", "")
-    # 与 app.py 中保持一致，截取 '|>' 之后的部分
-    if "|>" in text:
-        text = text.split("|>")[-1]
-    return text.strip()
+    text = res[0]["text"].split('|>')[-1]
+    return text
 
 def release_model():
     """

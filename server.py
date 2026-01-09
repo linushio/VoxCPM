@@ -6,6 +6,7 @@ import soundfile as sf
 import numpy as np
 import threading
 import logging
+from typing import Optional
 from flask import Flask, request, jsonify
 
 
@@ -13,13 +14,15 @@ from flask import Flask, request, jsonify
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 import torch
+from funasr import AutoModel
 
 from voxcpm import VoxCPM
 
 # --- 全局变量 ---
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
-tts_model = None
+tts_model: Optional[VoxCPM] = None
+asr_model: Optional[AutoModel] = None
 last_request_time = None
 model_lock = threading.Lock()
 release_timer = None
@@ -46,17 +49,8 @@ def get_model():
     if tts_model is None:
         with model_lock:
             # 再次检查，因为在等待锁的时候，其他线程可能已经加载了模型
-            if tts_model is None or current_model_type != model_type:
-                # 如果模型类型改变，先释放旧模型
-                if tts_model is not None and current_model_type != model_type:
-                    logging.info(f"模型类型从 {current_model_type} 切换到 {model_type}，释放旧模型...")
-                    del tts_model
-                    tts_model = None
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                
-                logging.info(f"开始加载 VoxCPM 模型...")
+            if tts_model is None:
+                logging.info("开始加载 VoxCPM 模型...")
                 try:
                     tts_model = VoxCPM.from_pretrained(
                         hf_model_id="openbmb/VoxCPM1.5",  # 或者使用本地路径
@@ -64,26 +58,62 @@ def get_model():
                         optimize=True
                     )
                     logging.info("VoxCPM 模型加载成功。")
-
-                        
                 except Exception as e:
                     logging.error(f"加载 VoxCPM 模型时发生错误: {e}")
                     raise
     
     return tts_model
 
+
+def get_asr_model() -> AutoModel:
+    """
+    懒加载 ASR 模型（用于从参考音频自动识别 prompt_text）。
+    """
+    global asr_model
+    if asr_model is not None:
+        return asr_model
+
+    with model_lock:
+        if asr_model is None:
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            logging.info(f"开始加载 ASR 模型 SenseVoiceSmall，device={device} ...")
+            try:
+                asr_model = AutoModel(
+                    model="iic/SenseVoiceSmall",
+                    disable_update=True,
+                    log_level="WARNING",
+                    device=device,
+                )
+                logging.info("ASR 模型加载成功。")
+            except Exception as e:
+                logging.error(f"加载 ASR 模型失败: {e}")
+                raise
+    return asr_model
+
+
+def recognize_prompt_text(prompt_wav_path: str) -> str:
+    """
+    使用 ASR 从参考音频中识别文本，用于自动生成 prompt_text。
+    """
+    model = get_asr_model()
+    res = model.generate(input=prompt_wav_path, language="auto", use_itn=True)
+    text = res[0].get("text", "")
+    # 与 app.py 中保持一致，截取 '|>' 之后的部分
+    if "|>" in text:
+        text = text.split("|>")[-1]
+    return text.strip()
+
 def release_model():
     """
     释放模型和GPU内存。这是一个线程安全的操作。
     """
-    global tts_model, current_model_type
+    global tts_model
     with model_lock:
         if tts_model is not None:
             logging.info(f"{MODEL_RELEASE_DELAY}秒内无请求，开始释放模型...")
             # 释放模型对象
             del tts_model
             tts_model = None
-            current_model_type = None
             gc.collect()
             # 如果使用torch和CUDA，清空CUDA缓存
             if 'torch' in globals() and hasattr(torch, 'cuda') and torch.cuda.is_available():
@@ -175,11 +205,30 @@ def text_to_speech_api():
             start_time = time.time()
             
             # VoxCPM 参数
-            prompt_text = data.get('prompt_text')  # 参考文本（可选）
+            prompt_text = data.get('prompt_text')  # 参考文本（可选，可以由后端 ASR 自动生成）
             cfg_value = data.get('cfg_value', 3.0)
             inference_timesteps = data.get('inference_timesteps', 30)
             normalize = data.get('normalize', False)
             denoise = data.get('denoise', False)
+
+            # ---- 自动补全 prompt_text：只给了音频没给文本时，在服务端调用 ASR 生成 ----
+            if speaker_audio_file and (not prompt_text or not str(prompt_text).strip()):
+                try:
+                    logging.info(f"[tts] task_id={task_id} 检测到仅提供参考音频，调用 ASR 自动识别 prompt_text ...")
+                    prompt_text = recognize_prompt_text(speaker_audio_file)
+                    if prompt_text:
+                        logging.info(f"[tts] task_id={task_id} ASR 识别到的 prompt_text: {prompt_text[:50]}...")
+                    else:
+                        logging.warning(f"[tts] task_id={task_id} ASR 未能识别到有效文本，将退回自由创作模式")
+                except Exception as e:
+                    logging.error(f"[tts] task_id={task_id} ASR 识别失败，将退回自由创作模式: {e}")
+                    prompt_text = None
+
+            # ---- 保证 VoxCPM 的约束：prompt_wav_path 和 prompt_text 要么都提供，要么都为 None ----
+            if not speaker_audio_file or not prompt_text or not str(prompt_text).strip():
+                # 任一缺失或 prompt_text 为空字符串 -> 不走语音克隆，改为自由创作
+                speaker_audio_file = None
+                prompt_text = None
 
             # 生成音频
             wav = model.generate(
